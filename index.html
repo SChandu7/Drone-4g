@@ -143,6 +143,50 @@ footer{text-align:center;padding:16px;font-size:10px;color:#bbb;letter-spacing:1
     <div class="bar-track"><div class="bar-fill" id="alt-fill" style="width:0%;background:var(--blue)"></div></div>
   </div>
   <div class="tc"><div class="lbl">V-SPEED</div><div class="val" id="t-vspd">0</div><div class="unit">cm/s</div></div>
+  <!-- GPS -->
+<div class="telem-grid" style="padding-top:0;">
+  <div class="tc">
+    <div class="lbl">GPS FIX</div>
+    <div class="val" id="gps-fix" style="font-size:14px;">NO FIX</div>
+    <div class="unit" id="gps-sats">0 sats</div>
+  </div>
+  <div class="tc">
+    <div class="lbl">GPS SPD</div>
+    <div class="val" id="gps-spd">0</div>
+    <div class="unit">cm/s</div>
+  </div>
+  <div class="tc">
+    <div class="lbl">HOME DIST</div>
+    <div class="val" id="gps-dist">0</div>
+    <div class="unit">m</div>
+  </div>
+  <div class="tc span2">
+    <div class="lbl">LATITUDE</div>
+    <div class="val" id="gps-lat" style="font-size:14px;">0.000000</div>
+  </div>
+  <div class="tc">
+    <div class="lbl">HOME DIR</div>
+    <div class="val" id="gps-dir">0</div>
+    <div class="unit">deg</div>
+  </div>
+  <div class="tc span2">
+    <div class="lbl">LONGITUDE</div>
+    <div class="val" id="gps-lon" style="font-size:14px;">0.000000</div>
+  </div>
+  <div class="tc">
+    <div class="lbl">GPS ALT</div>
+    <div class="val" id="gps-alt">0</div>
+    <div class="unit">m</div>
+  </div>
+</div>
+
+<!-- MAP LINK -->
+<div class="section">
+  <a id="map-link" href="#" target="_blank"
+     style="display:block;text-align:center;padding:12px;background:#fff;border:1px solid #e2e0dc;border-radius:10px;font-size:12px;font-weight:600;color:#2563eb;text-decoration:none;">
+    Open in Google Maps
+  </a>
+</div>
 </div>
 
 <!-- ADI -->
@@ -368,6 +412,27 @@ function updateTelem(d) {
   setText('adi-roll',  d.roll.toFixed(1));
   setText('adi-pitch', d.pitch.toFixed(1));
   setText('adi-hdg',   d.hdg);
+
+  // GPS
+if (d.gps_fix !== undefined) {
+  var fixEl = document.getElementById('gps-fix');
+  var satsEl = document.getElementById('gps-sats');
+  fixEl.textContent  = d.gps_fix ? 'FIX' : 'NO FIX';
+  fixEl.style.color  = d.gps_fix ? 'var(--green)' : 'var(--red)';
+  satsEl.textContent = d.gps_sats + ' sats';
+  setText('gps-spd',  d.gps_spd);
+  setText('gps-dist', d.gps_home_dist);
+  setText('gps-dir',  d.gps_home_dir);
+  setText('gps-alt',  d.gps_alt);
+  setText('gps-lat',  d.gps_lat.toFixed(6));
+  setText('gps-lon',  d.gps_lon.toFixed(6));
+  // Google Maps link
+  if (d.gps_fix && d.gps_lat !== 0) {
+    var mapUrl = 'https://maps.google.com/?q='+d.gps_lat.toFixed(6)+','+d.gps_lon.toFixed(6);
+    document.getElementById('map-link').href = mapUrl;
+    document.getElementById('map-link').textContent = 'Open in Google Maps ('+d.gps_lat.toFixed(4)+', '+d.gps_lon.toFixed(4)+')';
+  }
+}
 }
 
 function updateAdi(roll, pitch) {
