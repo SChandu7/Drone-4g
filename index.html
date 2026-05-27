@@ -98,8 +98,8 @@ footer{text-align:center;padding:16px;font-size:10px;color:#bbb;letter-spacing:1
 
 <!-- BROKER CONFIG -->
 <div class="broker-bar">
-  <input id="broker-ip"   value="13.203.219.206" placeholder="Broker IP"/>
-  <input id="broker-port" value="8083" placeholder="WS Port" style="max-width:80px"/>
+  <input id="broker-ip"   value="api.chandus7.in" placeholder="Broker IP"/>
+  <input id="broker-port" value="443" placeholder="WS Port" style="max-width:80px"/>
   <button onclick="connectBroker()">Connect</button>
 </div>
 
@@ -240,6 +240,21 @@ var client = null;
 var connected = false;
 var localThr = 1000;
 
+
+
+  function onConnect() {
+
+    connected = true;
+
+    setConn(true);
+
+    addLog("MQTT Connected");
+
+    client.subscribe("drone/telemetry");
+    client.subscribe("drone/status");
+}
+
+  
 // ── MQTT CONNECT ──────────────────────────────────────────────────
 function connectBroker() {
   var ip   = document.getElementById('broker-ip').value.trim();
@@ -252,7 +267,7 @@ client = new Paho.Client(
     "api.chandus7.in",
     443,
     "/mqtt",
-    clientId
+    cid
 );
   client.onConnectionLost = function(r) {
     connected = false;
@@ -273,8 +288,9 @@ client = new Paho.Client(
     useSSL: true,
     onSuccess: onConnect,
     onFailure: function(err){
-        console.log(err);
-    }
+    console.log(err);
+    addLog("MQTT FAIL: " + JSON.stringify(err));
+}
 });
 }
 
