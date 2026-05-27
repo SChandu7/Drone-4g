@@ -1,0 +1,509 @@
+// ================================================================
+// DRONE CONTROLLER - PRODUCTION
+// EC200U 4G + MQTT + SBUS + MSP + FAILSAFE
+// ================================================================
+// WIRING:
+//   EC200U internal UART  -> ESP32 IO21(RX) IO45(TX)
+//   FC SBUS IN            <- ESP32 pin 17  (Serial0 TX)
+//   FC TX1                -> ESP32 pin 16  (Serial1 RX)
+//   FC RX1                <- ESP32 pin 4   (Serial1 TX)
+//   GND                   -> GND
+// ================================================================
+// MQTT topics:
+//   drone/control   <- web sends commands  {"cmd":"arm"}
+//   drone/telemetry -> drone publishes FC data every 1s
+// ================================================================
+
+#define TINY_GSM_MODEM_BG96
+#define TINY_GSM_USE_GPRS true
+
+#define MSP_RAW_GPS    106
+#define MSP_COMP_GPS   107
+
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <sbus.h>
+
+// ── EC200U pins ───────────────────────────────────────────────────
+#define EC200U_RX   21
+#define EC200U_TX   45
+#define EC200U_BAUD 115200
+
+#define MQTT_LED 41
+bool ledState = false;
+unsigned long lastBlink = 0;
+
+// ── APN ──────────────────────────────────────────────────────────
+const char* APN = "airtelgprs.com";
+
+// ── MQTT broker ───────────────────────────────────────────────────
+const char* MQTT_SERVER = "13.203.219.206";
+const int   MQTT_PORT   = 1883;
+const char* MQTT_CLIENT = "Drone01";
+const char* TOPIC_CTRL  = "drone/control";
+const char* TOPIC_TELEM = "drone/telemetry";
+const char* TOPIC_STATUS = "drone/status";
+
+// ── Safety limits ─────────────────────────────────────────────────
+const int ALT_LIMIT_CM    = 800;   // 10 meters max altitude
+const int THR_MAX         = 1600;   // max throttle
+const int THR_MIN         = 1000;   // min throttle
+const int FAILSAFE_MS     = 15000;   // 3s no command = failsafe
+
+// ── SBUS Serial0 TX pin17 -> FC SBUS IN ──────────────────────────
+bfs::SbusTx   sbus_tx(&Serial0, -1, 17, true);
+bfs::SbusData sbus_data;
+
+// ── MSP FC TX1->pin16  FC RX1->pin4 ──────────────────────────────
+#define MSP_SERIAL   Serial1
+#define MSP_BAUD     115200
+#define MSP_STATUS   101
+#define MSP_ATTITUDE 108
+#define MSP_ANALOG   110
+#define MSP_ALTITUDE 109
+#define MSP_RC       105
+
+// ── RC channel values ─────────────────────────────────────────────
+int rollValue     = 1500;
+int pitchValue    = 1500;
+int throttleValue = 1000;
+int yawValue      = 1500;
+int armValue      = 1000;
+
+// ── Failsafe state ────────────────────────────────────────────────
+unsigned long lastCmdTime   = 0;
+bool          failsafeActive = false;
+
+// ── Telemetry from FC ─────────────────────────────────────────────
+struct Telemetry {
+  float   roll = 0, pitch = 0;
+  int     heading = 0, rssi = 0;
+  float   voltage = 0;
+  int     amperage = 0;
+  int32_t altitude = 0;
+  int16_t vspeed = 0;
+  bool    armed = false;
+  // GPS
+  uint8_t gpsFix = 0;       // 0=no fix, 1=fix
+  uint8_t gpsSats = 0;      // satellites count
+  int32_t gpsLat = 0;       // latitude  x10000000
+  int32_t gpsLon = 0;       // longitude x10000000
+  uint16_t gpsAlt = 0;      // GPS altitude meters
+  uint16_t gpsSpeed = 0;    // cm/s
+  uint16_t gpsCourse = 0;   // degrees x10
+  uint16_t gpsDistHome = 0; // meters
+  int16_t  gpsDirHome = 0;  // degrees
+} telem;
+
+// ── Objects ───────────────────────────────────────────────────────
+HardwareSerial ec200uSerial(2);
+TinyGsm        modem(ec200uSerial);
+TinyGsmClient  mqttNet(modem);
+PubSubClient   mqtt(mqttNet);
+
+// ── Helpers ───────────────────────────────────────────────────────
+int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+int rcToSbus(int rc)             { return map(rc, 1000, 2000, 172, 1811); }
+
+void triggerFailsafe(const char* reason) {
+  armValue      = 1000;
+  throttleValue = 1000;
+  rollValue     = 1500;
+  pitchValue    = 1500;
+  yawValue      = 1500;
+  failsafeActive = true;
+  Serial.print("FAILSAFE: "); Serial.println(reason);
+  if (mqtt.connected()) {
+    mqtt.publish(TOPIC_STATUS, reason);
+  }
+}
+
+// ================================================================
+// MSP
+// ================================================================
+void mspRequest(uint8_t cmd) {
+  uint8_t buf[6] = {'$', 'M', '<', 0, cmd, cmd};
+  MSP_SERIAL.write(buf, 6);
+}
+
+bool mspRead() {
+  static uint8_t state=0, cmd=0, len=0, idx=0, cksum=0;
+  static uint8_t payload[64];
+  while (MSP_SERIAL.available()) {
+    uint8_t c = MSP_SERIAL.read();
+    switch (state) {
+      case 0: if(c=='$') state=1; break;
+      case 1: if(c=='M') state=2; else state=0; break;
+      case 2: if(c=='>') state=3; else state=0; break;
+      case 3: len=c; idx=0; cksum=c; state=4; break;
+      case 4: cmd=c; cksum^=c; state=(len==0)?6:5; break;
+      case 5: payload[idx++]=c; cksum^=c; if(idx>=len) state=6; break;
+      case 6:
+        state=0;
+        if(cksum!=c) return false;
+        if(cmd==MSP_ATTITUDE && len>=6) {
+          telem.roll    = (int16_t)(payload[0]|payload[1]<<8)/10.0f;
+          telem.pitch   = (int16_t)(payload[2]|payload[3]<<8)/10.0f;
+          telem.heading = (int16_t)(payload[4]|payload[5]<<8);
+        } else if(cmd==MSP_ANALOG && len>=7) {
+          telem.voltage  = payload[0]/10.0f;
+          telem.amperage = payload[5]|payload[6]<<8;
+          telem.rssi     = payload[3]|payload[4]<<8;
+        } else if(cmd==MSP_ALTITUDE && len>=6) {
+          telem.altitude = (int32_t)(payload[0]|payload[1]<<8|payload[2]<<16|payload[3]<<24);
+          telem.vspeed   = (int16_t)(payload[4]|payload[5]<<8);
+        } else if(cmd==MSP_STATUS && len>=11) {
+          uint32_t flags = payload[6]|payload[7]<<8|payload[8]<<16|payload[9]<<24;
+          telem.armed = (flags & 0x01);
+        }else if(cmd==MSP_RAW_GPS && len>=16) {
+  telem.gpsFix    = payload[0];
+  telem.gpsSats   = payload[1];
+  telem.gpsLat    = (int32_t)(payload[2]|payload[3]<<8|payload[4]<<16|payload[5]<<24);
+  telem.gpsLon    = (int32_t)(payload[6]|payload[7]<<8|payload[8]<<16|payload[9]<<24);
+  telem.gpsAlt    = payload[10]|payload[11]<<8;
+  telem.gpsSpeed  = payload[12]|payload[13]<<8;
+  telem.gpsCourse = payload[14]|payload[15]<<8;
+}
+else if(cmd==MSP_COMP_GPS && len>=5) {
+  telem.gpsDistHome = payload[0]|payload[1]<<8;
+  telem.gpsDirHome  = payload[2]|payload[3]<<8;
+}
+        return true;
+    }
+  }
+  return false;
+}
+
+unsigned long lastMsp = 0;
+uint8_t mspCycle = 0;
+
+void pollMsp() {
+  if(millis()-lastMsp < 100) return;
+  lastMsp = millis();
+switch(mspCycle++ % 6) {
+  case 0: mspRequest(MSP_ATTITUDE); break;
+  case 1: mspRequest(MSP_ANALOG);   break;
+  case 2: mspRequest(MSP_ALTITUDE); break;
+  case 3: mspRequest(MSP_STATUS);   break;
+  case 4: mspRequest(MSP_RAW_GPS);  break;
+  case 5: mspRequest(MSP_COMP_GPS); break;
+}
+  unsigned long t = millis();
+  while(millis()-t < 8) mspRead();
+}
+
+// ================================================================
+// MQTT CALLBACK
+// ================================================================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  Serial.println("MQTT RX: " + msg);
+
+  JsonDocument doc;
+  if (deserializeJson(doc, msg)) {
+    Serial.println("JSON error"); return;
+  }
+
+  String cmd = doc["cmd"] | "";
+  int    val = doc["value"] | 0;
+
+  // ARM — only if throttle at zero
+  if (cmd == "arm") {
+    if (throttleValue <= 1000) {
+      armValue      = 2000;
+      throttleValue = 1000;
+      failsafeActive = false;
+      Serial.println(">> ARMED");
+    } else {
+      Serial.println(">> ARM REJECTED - lower throttle first");
+      mqtt.publish(TOPIC_STATUS, "arm_rejected_throttle_high");
+      return;
+    }
+  }
+
+  // DISARM
+  else if (cmd == "disarm") {
+    armValue      = 1000;
+    throttleValue = 1000;
+    rollValue     = 1500;
+    pitchValue    = 1500;
+    yawValue      = 1500;
+    failsafeActive = false;
+    Serial.println(">> DISARMED");
+  }
+
+  // CENTER
+  else if (cmd == "center") {
+    rollValue  = 1500;
+    pitchValue = 1500;
+    yawValue   = 1500;
+  }
+
+  // THROTTLE UP — blocked if alt limit reaAched
+  else if (cmd == "up") {
+    if (telem.altitude < ALT_LIMIT_CM) {
+      throttleValue = clamp(throttleValue+125, THR_MIN, THR_MAX);
+    } else {
+      Serial.println("ALT LIMIT REACHED - throttle blocked");
+      mqtt.publish(TOPIC_STATUS, "alt_limit_reached");
+    }
+  }
+
+  // THROTTLE DOWN
+  else if (cmd == "down") {
+    throttleValue = clamp(throttleValue-150, THR_MIN, THR_MAX);
+  }
+
+  // DIRECTION
+  else if (cmd == "forward")   { pitchValue = 1700; }
+  else if (cmd == "back")      { pitchValue = 1300; }
+  else if (cmd == "left")      { rollValue  = 1300; }
+  else if (cmd == "right")     { rollValue  = 1700; }
+  else if (cmd == "yaw_left")  { yawValue   = 1300; }
+  else if (cmd == "yaw_right") { yawValue   = 1700; }
+
+  // EXACT THROTTLE VALUE
+  else if (cmd == "throttle") {
+    if (telem.altitude < ALT_LIMIT_CM || val < throttleValue) {
+      throttleValue = clamp(val, THR_MIN, THR_MAX);
+    }
+  }
+
+  // Update last command time — resets failsafe timer
+  lastCmdTime    = millis();
+  failsafeActive = false;
+
+  Serial.print("Applied: "); Serial.println(cmd);
+}
+
+// ================================================================
+// MQTT CONNECT
+// ================================================================
+void connectMQTT() {
+  int tries = 0;
+  while (!mqtt.connected() && tries < 10) {
+    Serial.print("Connecting MQTT...");
+    if (mqtt.connect(MQTT_CLIENT)) {
+      Serial.println("CONNECTED");
+      mqtt.subscribe(TOPIC_CTRL);
+      mqtt.publish(TOPIC_STATUS, "drone_online");
+      Serial.println("Subscribed to drone/control");
+      return;
+    }
+    Serial.print("failed rc="); Serial.println(mqtt.state());
+    tries++;
+    delay(3000);
+  }
+  Serial.println("MQTT failed after 10 tries");
+}
+
+// ================================================================
+// PUBLISH TELEMETRY
+// ================================================================
+unsigned long lastTelem = 0;
+void publishTelemetry() {
+  if (millis()-lastTelem < 1000) return;
+  lastTelem = millis();
+  if (!mqtt.connected()) return;
+
+  JsonDocument doc;
+  doc["roll"]      = telem.roll;
+  doc["pitch"]     = telem.pitch;
+  doc["hdg"]       = telem.heading;
+  doc["volt"]      = telem.voltage;
+  doc["amp"]       = telem.amperage / 100.0f;
+  doc["rssi"]      = telem.rssi;
+  doc["alt"]       = telem.altitude;
+  doc["vs"]        = telem.vspeed;
+  doc["armed"]     = telem.armed;
+  doc["thr"]       = throttleValue;
+  doc["aux"]       = armValue;
+  doc["failsafe"]  = failsafeActive;
+  doc["alt_limit"] = ALT_LIMIT_CM;
+  doc["gps_fix"]   = telem.gpsFix;
+doc["gps_sats"]  = telem.gpsSats;
+doc["gps_lat"]   = telem.gpsLat / 10000000.0;   // convert to decimal degrees
+doc["gps_lon"]   = telem.gpsLon / 10000000.0;
+doc["gps_alt"]   = telem.gpsAlt;
+doc["gps_spd"]   = telem.gpsSpeed;
+doc["gps_home_dist"] = telem.gpsDistHome;
+doc["gps_home_dir"]  = telem.gpsDirHome;
+
+  String out;
+  serializeJson(doc, out);
+  mqtt.publish(TOPIC_TELEM, out.c_str());
+}
+
+// ================================================================
+// MODEM SETUP
+// ================================================================
+bool modemSetup() {
+  Serial.println("Starting EC200U...");
+  ec200uSerial.begin(EC200U_BAUD, SERIAL_8N1, EC200U_RX, EC200U_TX);
+  delay(4000);
+
+  ec200uSerial.println("AT"); delay(1000);
+  String r = "";
+  while(ec200uSerial.available()) r += (char)ec200uSerial.read();
+  Serial.println("AT: " + r);
+  if(r.indexOf("OK") < 0) { Serial.println("No AT!"); return false; }
+
+  ec200uSerial.println("ATE0"); delay(500);
+  while(ec200uSerial.available()) ec200uSerial.read();
+
+  Serial.print("SIM");
+  for(int i=0; i<15; i++) {
+    ec200uSerial.println("AT+CPIN?"); delay(1000);
+    String resp=""; while(ec200uSerial.available()) resp+=(char)ec200uSerial.read();
+    if(resp.indexOf("READY")>=0){ Serial.println(" OK"); break; }
+    Serial.print(".");
+    if(i==14){ Serial.println("\nSIM FAIL"); return false; }
+  }
+
+  Serial.print("Network");
+  for(int i=0; i<20; i++) {
+    ec200uSerial.println("AT+CREG?"); delay(1000);
+    String resp=""; while(ec200uSerial.available()) resp+=(char)ec200uSerial.read();
+    if(resp.indexOf(",1")>=0||resp.indexOf(",5")>=0){ Serial.println(" OK"); break; }
+    Serial.print(".");
+    if(i==19){ Serial.println("\nNetwork FAIL"); return false; }
+  }
+
+  ec200uSerial.println("AT+CGDCONT=1,\"IP\",\""+String(APN)+"\"");
+  delay(1000); while(ec200uSerial.available()) ec200uSerial.read();
+
+  ec200uSerial.println("AT+CGACT=1,1");
+  delay(8000); while(ec200uSerial.available()) ec200uSerial.read();
+
+  ec200uSerial.println("AT+CGPADDR=1"); delay(2000);
+  String ip=""; while(ec200uSerial.available()) ip+=(char)ec200uSerial.read();
+  Serial.println("IP: "+ip);
+  if(ip.indexOf("0.0.0.0")>=0||ip.indexOf("+CGPADDR")<0){
+    Serial.println("No IP!"); return false;
+  }
+
+  Serial.println("4G Connected!");
+  modem.maintain();
+  return true;
+}
+
+// ================================================================
+// SETUP
+// ================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  pinMode(MQTT_LED, OUTPUT);
+digitalWrite(MQTT_LED, LOW);
+  Serial.println("=== DRONE PRODUCTION BOOT ===");
+
+  MSP_SERIAL.begin(MSP_BAUD, SERIAL_8N1, 16, 4);
+
+  sbus_tx.Begin();
+  for(int i=0; i<16; i++) sbus_data.ch[i] = 992;
+  sbus_data.ch[2] = 172;  // throttle low
+
+  lastCmdTime = millis();  // init failsafe timer
+
+  if(!modemSetup()) {
+    Serial.println("Modem failed - restart in 10s");
+    delay(10000); ESP.restart();
+  }
+
+  Serial.print("Testing TCP...");
+  if(mqttNet.connect(MQTT_SERVER, MQTT_PORT)) {
+    Serial.println("TCP OK"); mqttNet.stop(); delay(500);
+  } else {
+    Serial.println("TCP FAILED");
+  }
+
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(30);
+  mqtt.setBufferSize(512);
+
+  Serial.print("NET=");
+Serial.println(modem.isNetworkConnected());
+
+Serial.print("GPRS=");
+Serial.println(modem.isGprsConnected());
+
+  connectMQTT();
+
+  Serial.println("=== READY ===");
+}
+
+
+void mqttLedTask() {
+
+  if (mqtt.connected()) {
+
+    digitalWrite(MQTT_LED, HIGH);
+    ledState = true;
+
+
+  } else {
+
+    digitalWrite(MQTT_LED, LOW);
+    ledState = false;
+  }
+}
+// ================================================================
+// LOOP
+// ================================================================
+unsigned long lastReconnect = 0;
+
+void loop() {
+
+  // MQTT connection check
+  if(!mqtt.connected()) {
+    // Emergency disarm if MQTT drops while armed
+    if(armValue == 2000) {
+      triggerFailsafe("mqtt_disconnected");
+    }
+    if(millis()-lastReconnect > 5000) {
+      lastReconnect = millis();
+      Serial.println("MQTT lost - reconnecting...");
+      connectMQTT();
+    }
+  } else {
+    mqtt.loop();
+  }
+
+  mqttLedTask();
+
+  // Failsafe — 3 seconds no command while armed
+  if(armValue == 2000 && millis()-lastCmdTime > FAILSAFE_MS) {
+    if(!failsafeActive) {
+      triggerFailsafe("no_command_3s");
+    }
+  }
+
+  // MSP telemetry from FC
+  pollMsp();
+  mspRead();
+
+  // Publish telemetry
+  publishTelemetry();
+
+  // SBUS to FC
+  sbus_data.ch[0] = rcToSbus(rollValue);
+  sbus_data.ch[1] = rcToSbus(pitchValue);
+  sbus_data.ch[2] = rcToSbus(throttleValue);
+  sbus_data.ch[3] = rcToSbus(yawValue);
+  sbus_data.ch[4] = rcToSbus(armValue);
+  sbus_tx.data(sbus_data);
+  sbus_tx.Write();
+
+  // Debug every 2s
+  static unsigned long lastPrint = 0;
+  if(millis()-lastPrint > 2000) {
+    lastPrint = millis();
+    Serial.printf("ARM=%d THR=%d ROLL=%.1f ALT=%ld VOLT=%.1f FS=%d\n",
+      armValue, throttleValue, telem.roll, telem.altitude, telem.voltage, failsafeActive);
+  }
+
+  delay(10);
+}
