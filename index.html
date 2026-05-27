@@ -248,8 +248,12 @@ function connectBroker() {
 
   if (client) { try { client.disconnect(); } catch(e){} }
 
-  client = new Paho.Client(ip, Number(port), cid);
-
+client = new Paho.Client(
+    "api.chandus7.in",
+    443,
+    "/mqtt",
+    clientId
+);
   client.onConnectionLost = function(r) {
     connected = false;
     setConn(false);
@@ -266,21 +270,12 @@ function connectBroker() {
   };
 
   client.connect({
-    onSuccess: function() {
-      connected = true;
-      setConn(true);
-      client.subscribe('drone/telemetry');
-      client.subscribe('drone/status');
-      addLog('Connected to ' + ip + ':' + port);
-    },
-    onFailure: function(e) {
-      connected = false;
-      setConn(false);
-      addLog('Connect failed: ' + e.errorMessage);
-    },
-    timeout: 10,
-    keepAliveInterval: 30
-  });
+    useSSL: true,
+    onSuccess: onConnect,
+    onFailure: function(err){
+        console.log(err);
+    }
+});
 }
 
 // ── SEND COMMAND ──────────────────────────────────────────────────
