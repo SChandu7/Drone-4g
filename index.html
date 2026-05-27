@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Drone GCS</title>
+<script src="https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt-min.js"></script><style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+:root{
+  --bg:#f5f5f4;--surface:#fff;--surface2:#f0efed;
+  --border:#e2e0dc;--text:#1a1917;--sub:#6b6963;
+  --green:#16a34a;--red:#dc2626;--blue:#2563eb;--amber:#d97706;
+  --shadow:0 1px 3px rgba(0,0,0,.08);
+}
+body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,sans-serif;font-size:14px;min-height:100vh;}
+
+/* HEADER */
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;}
+.logo{font-weight:700;font-size:15px;letter-spacing:.5px;}
+.conn-badge{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--sub);}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--red);}
+.dot.live{background:var(--green);}
+
+/* BROKER CONFIG */
+.broker-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.broker-bar input{flex:1;min-width:160px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;background:var(--surface2);}
+.broker-bar button{padding:7px 14px;border-radius:8px;border:none;background:var(--text);color:#fff;font-size:12px;font-weight:600;cursor:pointer;}
+
+/* FAILSAFE BANNER */
+#fs-banner{display:none;margin:10px 12px 0;padding:10px 14px;border-radius:10px;background:#fef3c7;border:1px solid #fbbf24;font-size:12px;font-weight:700;color:#92400e;letter-spacing:.5px;}
+#fs-banner.show{display:block;}
+
+/* ARM BANNER */
+#arm-banner{margin:10px 12px 0;padding:10px 14px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:600;}
+#arm-banner.armed{background:#dcfce7;border-color:#86efac;}
+#arm-state{font-size:18px;font-weight:700;color:var(--red);}
+#arm-banner.armed #arm-state{color:var(--green);}
+
+/* TELEMETRY GRID */
+.telem-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px 12px;}
+.tc{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 8px;box-shadow:var(--shadow);text-align:center;}
+.tc .lbl{font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--sub);margin-bottom:3px;text-transform:uppercase;}
+.tc .val{font-size:19px;font-weight:700;line-height:1;}
+.tc .unit{font-size:9px;color:var(--sub);margin-top:1px;}
+.tc.span2{grid-column:span 2;}
+.bar-track{height:5px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-top:5px;}
+.bar-fill{height:100%;border-radius:3px;transition:width .3s;}
+
+/* SECTIONS */
+.section{padding:0 12px 10px;}
+.section-title{font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--sub);margin-bottom:8px;text-transform:uppercase;}
+
+/* THROTTLE */
+.thr-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:var(--shadow);}
+.thr-display{display:flex;align-items:baseline;gap:4px;margin-bottom:8px;}
+.thr-num{font-size:34px;font-weight:700;line-height:1;}
+.thr-unit{font-size:12px;color:var(--sub);}
+.thr-track{height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;margin-bottom:4px;}
+.thr-fill{height:100%;border-radius:4px;background:var(--text);transition:width .3s;}
+.thr-marks{display:flex;justify-content:space-between;font-size:10px;color:#9ca3af;margin-bottom:12px;}
+
+/* BUTTONS */
+button{font-family:Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;padding:14px 8px;border-radius:10px;cursor:pointer;border:1.5px solid var(--border);background:var(--surface);color:var(--text);box-shadow:var(--shadow);width:100%;transition:transform .1s,background .1s;}
+button:active{transform:scale(.95);background:var(--surface2);}
+.btn-arm{border-color:#86efac;color:var(--green);background:#f0fdf4;}
+.btn-disarm{border-color:#fca5a5;color:var(--red);background:#fff5f5;}
+.btn-thr{border-color:var(--text);background:var(--text);color:#fff;}
+.btn-center{border-color:var(--blue);color:var(--blue);font-size:11px;}
+.btn-yaw{border-color:var(--amber);color:var(--amber);}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+.spacer{visibility:hidden;}
+
+/* ADI */
+.adi-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:var(--shadow);}
+.adi-wrap{display:flex;justify-content:center;}
+.adi-nums{display:flex;justify-content:space-around;margin-top:10px;}
+.adi-num-item{text-align:center;}
+.adi-num-lbl{font-size:9px;font-weight:700;letter-spacing:1px;color:var(--sub);text-transform:uppercase;}
+.adi-num-val{font-size:15px;font-weight:700;}
+
+/* LOG */
+.log-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px;box-shadow:var(--shadow);}
+#log{height:80px;overflow-y:auto;font-size:10px;color:var(--sub);font-family:monospace;line-height:1.6;}
+
+footer{text-align:center;padding:16px;font-size:10px;color:#bbb;letter-spacing:1px;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">DRONE GCS</div>
+  <div class="conn-badge">
+    <span class="dot" id="dot"></span>
+    <span id="conn-lbl">DISCONNECTED</span>
+  </div>
+</header>
+
+<!-- BROKER CONFIG -->
+<div class="broker-bar">
+  <input id="broker-ip"   value="13.203.219.206" placeholder="Broker IP"/>
+  <input id="broker-port" value="8083" placeholder="WS Port" style="max-width:80px"/>
+  <button onclick="connectBroker()">Connect</button>
+</div>
+
+<!-- FAILSAFE BANNER -->
+<div id="fs-banner">⚠ FAILSAFE ACTIVE</div>
+
+<!-- ARM BANNER -->
+<div id="arm-banner">
+  <div>
+    <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:#6b6963;text-transform:uppercase;margin-bottom:2px;">FLIGHT STATUS</div>
+    <div id="arm-state">DISARMED</div>
+  </div>
+  <div id="flight-info" style="font-size:11px;color:#6b6963;font-weight:600;text-align:right;">
+    <div id="t-volt-hdr">0.0V</div>
+    <div id="t-alt-hdr">0cm</div>
+  </div>
+</div>
+
+<!-- TELEMETRY -->
+<div class="telem-grid">
+  <div class="tc"><div class="lbl">ROLL</div><div class="val" id="t-roll">0.0</div><div class="unit">deg</div></div>
+  <div class="tc"><div class="lbl">PITCH</div><div class="val" id="t-pitch">0.0</div><div class="unit">deg</div></div>
+  <div class="tc"><div class="lbl">HEADING</div><div class="val" id="t-hdg">0</div><div class="unit">deg</div></div>
+  <div class="tc span2">
+    <div class="lbl">BATTERY</div>
+    <div style="display:flex;align-items:baseline;gap:4px;">
+      <div class="val" id="t-volt">0.0</div><div class="unit">V</div>
+      <div style="flex:1"></div>
+      <div style="font-size:11px;color:var(--sub);" id="t-amp">0A</div>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="bat-fill" style="width:0%;background:var(--green)"></div></div>
+  </div>
+  <div class="tc"><div class="lbl">RSSI</div><div class="val" id="t-rssi">0</div><div class="unit">/1023</div></div>
+  <div class="tc span2">
+    <div class="lbl">ALTITUDE</div>
+    <div style="display:flex;align-items:baseline;gap:4px;">
+      <div class="val" id="t-alt">0</div><div class="unit">cm</div>
+      <div style="flex:1"></div>
+      <div style="font-size:11px;color:var(--sub);" id="t-vs">0cm/s</div>
+    </div>
+    <div class="bar-track"><div class="bar-fill" id="alt-fill" style="width:0%;background:var(--blue)"></div></div>
+  </div>
+  <div class="tc"><div class="lbl">V-SPEED</div><div class="val" id="t-vspd">0</div><div class="unit">cm/s</div></div>
+</div>
+
+<!-- ADI -->
+<div class="section">
+  <div class="adi-card">
+    <div class="section-title">ATTITUDE INDICATOR</div>
+    <div class="adi-wrap">
+      <svg width="130" height="130" viewBox="0 0 140 140" xmlns="http://www.w3.org/2000/svg">
+        <defs><clipPath id="adiClip"><circle cx="70" cy="70" r="68"/></clipPath></defs>
+        <g id="adi-horizon" clip-path="url(#adiClip)">
+          <rect x="-10" y="-150" width="160" height="290" fill="#bfdbfe"/>
+          <rect x="-10" y="70" width="160" height="160" fill="#a16207"/>
+          <line x1="-10" y1="70" x2="150" y2="70" stroke="#fff" stroke-width="1.5"/>
+        </g>
+        <circle cx="70" cy="70" r="68" fill="none" stroke="#d1d5db" stroke-width="2"/>
+        <line x1="30" y1="70" x2="55" y2="70" stroke="#1a1917" stroke-width="2"/>
+        <line x1="85" y1="70" x2="110" y2="70" stroke="#1a1917" stroke-width="2"/>
+        <circle cx="70" cy="70" r="4" fill="#1a1917"/>
+        <g id="adi-roll-ptr" transform="rotate(0,70,70)">
+          <polygon points="70,14 66,22 74,22" fill="#1a1917"/>
+        </g>
+      </svg>
+    </div>
+    <div class="adi-nums">
+      <div class="adi-num-item"><div class="adi-num-lbl">ROLL</div><div class="adi-num-val" id="adi-roll">0.0</div></div>
+      <div class="adi-num-item"><div class="adi-num-lbl">PITCH</div><div class="adi-num-val" id="adi-pitch">0.0</div></div>
+      <div class="adi-num-item"><div class="adi-num-lbl">HDG</div><div class="adi-num-val" id="adi-hdg">0</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ARM CONTROL -->
+<div class="section">
+  <div class="section-title">ARM CONTROL</div>
+  <div class="grid2">
+    <button class="btn-arm"    onclick="send('arm')">ARM</button>
+    <button class="btn-disarm" onclick="send('disarm')">DISARM</button>
+  </div>
+</div>
+
+<!-- THROTTLE -->
+<div class="section">
+  <div class="thr-card">
+    <div class="section-title">THROTTLE</div>
+    <div class="thr-display">
+      <div class="thr-num" id="thr-val">1000</div>
+      <div class="thr-unit">us</div>
+      <div style="flex:1"></div>
+      <div style="font-size:19px;font-weight:700;" id="thr-pct">0%</div>
+    </div>
+    <div class="thr-track"><div class="thr-fill" id="thr-bar" style="width:0%"></div></div>
+    <div class="thr-marks"><span>1000</span><span>1300</span><span>1600</span></div>
+    <div class="grid2">
+      <button class="btn-thr" onclick="send('up')">+ 50</button>
+      <button class="btn-thr" onclick="send('down')">- 50</button>
+    </div>
+  </div>
+</div>
+
+<!-- DIRECTION -->
+<div class="section">
+  <div class="section-title">DIRECTION</div>
+  <div class="grid3" style="margin-bottom:8px;">
+    <div class="spacer"></div>
+    <button onclick="send('forward')">FWD</button>
+    <div class="spacer"></div>
+    <button onclick="send('left')">LEFT</button>
+    <button class="btn-center" onclick="send('center')">CTR</button>
+    <button onclick="send('right')">RIGHT</button>
+    <div class="spacer"></div>
+    <button onclick="send('back')">BACK</button>
+    <div class="spacer"></div>
+  </div>
+</div>
+
+<!-- YAW -->
+<div class="section">
+  <div class="section-title">YAW</div>
+  <div class="grid2">
+    <button class="btn-yaw" onclick="send('yaw_left')">YAW L</button>
+    <button class="btn-yaw" onclick="send('yaw_right')">YAW R</button>
+  </div>
+</div>
+
+<!-- LOG -->
+<div class="section">
+  <div class="section-title">COMMAND LOG</div>
+  <div class="log-card"><div id="log"></div></div>
+</div>
+
+<footer>DRONE GCS - MQTT 4G - PRODUCTION</footer>
+
+<script>
+var client = null;
+var connected = false;
+var localThr = 1000;
+
+// ── MQTT CONNECT ──────────────────────────────────────────────────
+function connectBroker() {
+  var ip   = document.getElementById('broker-ip').value.trim();
+  var port = parseInt(document.getElementById('broker-port').value.trim());
+  var cid  = 'gcs_' + Math.random().toString(36).substr(2, 6);
+
+  if (client) { try { client.disconnect(); } catch(e){} }
+
+  client = new Paho.Client(ip, Number(port), cid);
+
+  client.onConnectionLost = function(r) {
+    connected = false;
+    setConn(false);
+    addLog('Connection lost: ' + r.errorMessage);
+  };
+
+  client.onMessageArrived = function(m) {
+    if (m.destinationName === 'drone/telemetry') {
+      try { updateTelem(JSON.parse(m.payloadString)); } catch(e){}
+    }
+    if (m.destinationName === 'drone/status') {
+      addLog('STATUS: ' + m.payloadString);
+    }
+  };
+
+  client.connect({
+    onSuccess: function() {
+      connected = true;
+      setConn(true);
+      client.subscribe('drone/telemetry');
+      client.subscribe('drone/status');
+      addLog('Connected to ' + ip + ':' + port);
+    },
+    onFailure: function(e) {
+      connected = false;
+      setConn(false);
+      addLog('Connect failed: ' + e.errorMessage);
+    },
+    timeout: 10,
+    keepAliveInterval: 30
+  });
+}
+
+// ── SEND COMMAND ──────────────────────────────────────────────────
+function send(cmd, val) {
+  console.log("BUTTON:", cmd);
+
+  if (!connected) {
+    addLog('Not connected');
+    return;
+  }
+
+  var obj = {cmd: cmd};
+
+  console.log("JSON:", JSON.stringify(obj));
+
+var msg = new Paho.Message(JSON.stringify(obj));
+  msg.destinationName = 'drone/control';
+
+  console.log("PUBLISH:", msg.destinationName);
+
+  client.send(msg);
+
+  addLog('SEND: ' + JSON.stringify(obj));
+}
+
+// ── UPDATE TELEMETRY ──────────────────────────────────────────────
+function updateTelem(d) {
+  // arm banner
+  var banner = document.getElementById('arm-banner');
+  var armEl  = document.getElementById('arm-state');
+  if (d.armed) { banner.className='armed'; armEl.textContent='ARMED'; }
+  else         { banner.className='';      armEl.textContent='DISARMED'; }
+
+  // failsafe banner
+  var fsb = document.getElementById('fs-banner');
+  if (d.failsafe) fsb.classList.add('show');
+  else            fsb.classList.remove('show');
+
+  // values
+  setText('t-roll',  d.roll.toFixed(1));
+  setText('t-pitch', d.pitch.toFixed(1));
+  setText('t-hdg',   d.hdg);
+  setText('t-volt',  d.volt.toFixed(1));
+  setText('t-amp',   (d.amp||0).toFixed(1)+'A');
+  setText('t-rssi',  d.rssi);
+  setText('t-alt',   d.alt);
+  setText('t-vs',    (d.vs>=0?'+':'')+d.vs+' cm/s');
+  setText('t-vspd',  d.vs);
+
+  // header
+  setText('t-volt-hdr', d.volt.toFixed(1)+'V');
+  setText('t-alt-hdr',  d.alt+'cm');
+
+  // battery bar (3S: 9-12.6V)
+  var batPct = Math.max(0,Math.min(100,((d.volt-9.0)/3.6)*100));
+  var bf = document.getElementById('bat-fill');
+  bf.style.width = batPct+'%';
+  bf.style.background = batPct<20?'#dc2626':batPct<40?'#d97706':'#16a34a';
+
+  // alt bar
+  var altPct = Math.max(0,Math.min(100,(d.alt/1000)*100));
+  document.getElementById('alt-fill').style.width = altPct+'%';
+
+  // throttle
+  localThr = d.thr || 1000;
+  var thrPct = Math.round(((localThr-1000)/600)*100);
+  if(thrPct<0) thrPct=0; if(thrPct>100) thrPct=100;
+  setText('thr-val', localThr);
+  setText('thr-pct', thrPct+'%');
+  document.getElementById('thr-bar').style.width = thrPct+'%';
+
+  // ADI
+  updateAdi(d.roll, d.pitch);
+  setText('adi-roll',  d.roll.toFixed(1));
+  setText('adi-pitch', d.pitch.toFixed(1));
+  setText('adi-hdg',   d.hdg);
+}
+
+function updateAdi(roll, pitch) {
+  var pitchOffset = pitch * 1.5;
+  document.getElementById('adi-horizon').setAttribute('transform',
+    'rotate('+roll+',70,70) translate(0,'+pitchOffset+')');
+  document.getElementById('adi-roll-ptr').setAttribute('transform',
+    'rotate('+roll+',70,70)');
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────
+function setText(id, val) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function setConn(ok) {
+  document.getElementById('dot').className = ok ? 'dot live' : 'dot';
+  document.getElementById('conn-lbl').textContent = ok ? 'CONNECTED' : 'DISCONNECTED';
+}
+
+function addLog(msg) {
+  var box = document.getElementById('log');
+  var t   = new Date().toLocaleTimeString();
+  box.innerHTML += '['+t+'] '+msg+'<br>';
+  box.scrollTop = box.scrollHeight;
+}
+
+// Auto connect on load
+window.onload = function() { connectBroker(); };
+</script>
+</body>
+</html>
