@@ -98,7 +98,7 @@ footer{text-align:center;padding:16px;font-size:10px;color:#bbb;letter-spacing:1
 
 <!-- BROKER CONFIG -->
 <div class="broker-bar">
-  <input id="broker-ip"   value="api.navyach.in" placeholder="Broker IP"/>
+  <input id="broker-ip"   value="api.chandus7.in" placeholder="Broker IP"/>
   <input id="broker-port" value="443" placeholder="WS Port" style="max-width:80px"/>
   <button onclick="connectBroker()">Connect</button>
 </div>
@@ -181,9 +181,15 @@ footer{text-align:center;padding:16px;font-size:10px;color:#bbb;letter-spacing:1
 </div>
 
 <!-- MAP LINK -->
+<!-- LIVE VIDEO -->
 <div class="section">
+  <div class="section-title">LIVE CAMERA</div>
+  <div style="background:#000;border-radius:12px;overflow:hidden;border:1px solid var(--border);">
+    <img id="video-feed" src="https://api.navyach.in/api/video/frame/"
+         style="width:100%;display:block;" alt="camera"/>
+  </div>
   <a id="map-link" href="#" target="_blank"
-     style="display:block;text-align:center;padding:12px;background:#fff;border:1px solid #e2e0dc;border-radius:10px;font-size:12px;font-weight:600;color:#2563eb;text-decoration:none;">
+     style="display:block;text-align:center;padding:10px;margin-top:8px;background:#fff;border:1px solid var(--border);border-radius:10px;font-size:12px;font-weight:600;color:#2563eb;text-decoration:none;">
     Open in Google Maps
   </a>
 </div>
@@ -308,7 +314,7 @@ function connectBroker() {
   if (client) { try { client.disconnect(); } catch(e){} }
 
 client = new Paho.Client(
-    "api.navyach.in",
+    "api.chandus7.in",
     443,
     "/mqtt",
     cid
@@ -460,6 +466,12 @@ function addLog(msg) {
   box.innerHTML += '['+t+'] '+msg+'<br>';
   box.scrollTop = box.scrollHeight;
 }
+
+  // Live video refresh — single frame polling (low fps, reliable over 4G)
+setInterval(function(){
+  var img = document.getElementById('video-feed');
+  if (img) img.src = 'https://api.navyach.in/api/video/frame/?t=' + Date.now();
+}, 150);  // ~6-7 fps display
 
 // Auto connect on load
 window.onload = function() { connectBroker(); };
