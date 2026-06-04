@@ -471,7 +471,7 @@ function addLog(msg) {
 setInterval(function(){
   var img = document.getElementById('video-feed');
 if (img) img.src = 'https://api.chandus7.in/api/4gdrone/video/frame/?t=' + Date.now();
-}, 67);  // ~6-7 fps display
+}, 150);  // ~6-7 fps display
 
 // Auto connect on load
 window.onload = function() { connectBroker(); };
